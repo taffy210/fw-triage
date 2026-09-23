@@ -24,6 +24,10 @@ INDICATORS = [
     "xmfv", "xmeye", "obfusc", "xor",
 ]
 
+# \b word boundaries so short tokens (aes, rsa, otp, xor) match whole words,
+# not substrings buried in unrelated text ("rsa" in "conversation" etc.).
+_PAT = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in INDICATORS) + r")\b", re.I)
+
 
 def iter_strings(data, minlen=4):
     cur = bytearray()
@@ -47,12 +51,15 @@ def main():
     ap.add_argument("-m", "--minlen", type=int, default=4)
     args = ap.parse_args()
 
-    data = open(args.file, "rb").read()
-    pat = re.compile("|".join(re.escape(w) for w in INDICATORS), re.I)
+    try:
+        with open(args.file, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise SystemExit(f"cannot read {args.file}: {e}")
 
     seen = 0
     for off, s in iter_strings(data, args.minlen):
-        if pat.search(s):
+        if _PAT.search(s):
             seen += 1
             print(f"0x{off:08x}  {s.strip()}")
 

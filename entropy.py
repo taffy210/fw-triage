@@ -33,8 +33,16 @@ def main():
     ap.add_argument("--csv", help="write per-window entropy to this CSV (for plotting)")
     args = ap.parse_args()
 
+    if args.window <= 0:
+        sys.exit("window must be a positive number of bytes")
+    if args.step < 0:
+        sys.exit("step cannot be negative")
     step = args.step or args.window
-    data = open(args.file, "rb").read()
+    try:
+        with open(args.file, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        sys.exit(f"cannot read {args.file}: {e}")
     if not data:
         sys.exit("empty file")
 

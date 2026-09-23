@@ -3,7 +3,13 @@
 
 Cheap gear loves to hide behind a one-byte XOR and call it encryption. Before
 you declare AES, rule that out: XOR the blob against all 256 keys and look for
-known file magics or a collapse in entropy.
+known file magics, or for the output turning into mostly-printable text
+(readable strings are a strong tell you hit the right key).
+
+Note: entropy is *not* a useful signal here. Single-byte XOR is a bijection on
+the byte alphabet, so it leaves the byte-frequency distribution — and therefore
+the Shannon entropy — unchanged for every key. We score printable-ASCII ratio
+instead, which actually varies with the key.
 
 Companion to:
 https://zero-entry.co.za/posts/firmware-xiongmai-vs-tplink-vigi/
@@ -22,7 +28,6 @@ MAGICS = {
     b"\x85\x19": "jffs2",
     b"\x7fELF": "ELF",
     b"\x27\x05\x19\x56": "u-boot uImage",
-    b"ustar": "tar",
     b"\x28\xb5\x2f\xfd": "zstd",
     b"\x04\x22\x4d\x18": "lz4",
     b"ANDROID!": "android boot",
@@ -37,16 +42,28 @@ def entropy(block):
     return -sum((v / n) * math.log2(v / n) for v in c.values())
 
 
+def printable_ratio(block):
+    """Fraction of bytes that are printable ASCII (plus tab/newline/CR). Unlike
+    entropy, this changes with the XOR key, so it's a usable signal for spotting
+    the key that turns a blob back into config/text."""
+    if not block:
+        return 0.0
+    printable = sum(1 for b in block if 32 <= b < 127 or b in (9, 10, 13))
+    return printable / len(block)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Single-byte XOR sweep for magics / entropy drop.")
+    ap = argparse.ArgumentParser(description="Single-byte XOR sweep for file magics / printable text.")
     ap.add_argument("file")
     ap.add_argument("-n", "--bytes", type=int, default=65536,
                     help="how much of the file to test (default 64K)")
-    ap.add_argument("--entropy-drop", type=float, default=7.0,
-                    help="flag keys whose output entropy falls below this (default 7.0)")
     args = ap.parse_args()
 
-    data = open(args.file, "rb").read(args.bytes)
+    try:
+        with open(args.file, "rb") as f:
+            data = f.read(args.bytes)
+    except OSError as e:
+        sys.exit(f"cannot read {args.file}: {e}")
     if not data:
         sys.exit("empty file")
 
@@ -61,17 +78,26 @@ def main():
         # puts the format magic at offset 0. Scanning the whole buffer for short
         # magics just manufactures false positives on high-entropy data.
         found = [name for magic, name in MAGICS.items() if x.startswith(magic)]
+        # tar's "ustar" magic sits at offset 257, not 0, so check it explicitly.
+        if x[257:262] == b"ustar":
+            found.append("tar")
         if found:
             hits += 1
             print(f"key 0x{k:02x}: {', '.join(found)}")
-        elif base >= 7.5 and entropy(x[:4096]) < args.entropy_drop:
-            hits += 1
-            print(f"key 0x{k:02x}: entropy drops to {entropy(x[:4096]):.3f}, worth a look")
 
     print()
     if hits == 0:
-        print("no single-byte XOR hits. Not XOR.")
-        print("if entropy was flat ~8.0, suspect real crypto (AES etc.) and go read the kernel strings.")
+        # Entropy can't rank keys (it's XOR-invariant), so fall back to the
+        # padding heuristic: firmware is full of 0x00 runs, and 0x00 ^ key == key,
+        # so the most common byte is the single most likely key. Report it (with
+        # how printable the result looks) as a lead rather than flagging noise.
+        guess = Counter(data).most_common(1)[0][0]
+        pr = printable_ratio(bytes(b ^ guess for b in data[:4096]))
+        print("no known file magic under any single-byte key.")
+        print(f"best key guess (most common byte, = 0x00 padding under XOR): "
+              f"0x{guess:02x} -> {pr * 100:.0f}% printable at the start")
+        print(f"try:  xor 0x{guess:02x} and re-run binwalk; if entropy was flat "
+              f"~8.0 with no structure, suspect real crypto (AES etc.).")
     else:
         print(f"{hits} candidate key(s) above. Single-byte XOR is plausible, go verify the full file.")
 
